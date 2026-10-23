@@ -1,16 +1,25 @@
 import random
 import time
 import datetime
+import re
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import capsolver
 from urllib.parse import quote
 
 # How long a task keeps trying before giving up (seconds).
-# Start at 08:59:59 + 7s = stops at ~09:00:06.
-MAX_RUNTIME_SECONDS = 7
+# Start at 08:59:59 + 4s = stops at ~09:00:03.
+MAX_RUNTIME_SECONDS = 4
 # Longest wait between retries after Resy errors / rate limits (seconds).
 MAX_BACKOFF_SECONDS = 1
+# Burst mode: during the first 1.5s of the minute (xx:00:00.0 - xx:00:01.5), when seats drop,
+# wait only this long between checks (~3-5 checks per second, limited by Resy's response time).
+BURST_DELAY_SECONDS = 0.05
+
+
+def in_burst_window():
+    now = datetime.datetime.now()
+    return now.second == 0 or (now.second == 1 and now.microsecond < 500000)
 
 
 def log(msg):
@@ -44,6 +53,15 @@ def slot_minutes(slot):
     except Exception:
         hh, mm = slot['config']['token'].split('/')[8].split(':')[:2]
     return int(hh) * 60 + int(mm)
+
+
+def slot_date(slot):
+    # "2026-11-12". Resy's /4/find can return slots for a DIFFERENT day than requested, so always check.
+    try:
+        return slot['date']['start'].split(' ')[0]
+    except Exception:
+        m = re.search(r'\d{4}-\d{2}-\d{2}', slot.get('config', {}).get('token', ''))
+        return m.group(0) if m else None
 
 
 def to_minutes(value, is_end):
@@ -123,6 +141,8 @@ def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
                 except Exception:
                     continue
                 token = slot['config']['token']
+                if slot_date(slot) != day:
+                    continue  # wrong date - never book it
                 if start_min <= minutes <= end_min and token not in tried:
                     candidates.append(slot)
 
@@ -146,7 +166,11 @@ def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
                     return
                 log(f'Booking {label} failed: {str(result)[:300]}')
 
-        time.sleep(backoff)
+        # Burst only when Resy is healthy; after an error, respect the backoff.
+        if backoff == delay and in_burst_window():
+            time.sleep(BURST_DELAY_SECONDS)
+        else:
+            time.sleep(backoff)
 
     send_discord_notification(webhook_url, f'Gave up on venue {restaurant_id} after {MAX_RUNTIME_SECONDS}s ({attempts} checks).')
 

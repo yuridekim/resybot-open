@@ -1047,12 +1047,6 @@ def start_tasks():
     if not tasks:
         click.echo('No tasks found. Please add tasks before starting.')
         return
-    if not proxies:
-        click.echo('No proxies found. Please add proxies before starting.')
-        return
-    if not info:
-        click.echo('No user info found. Please set user info before starting.')
-        return
 
     try:
         run_tasks_concurrently(tasks, info.get('capsolver_key', ''), info.get('capmonster_key',''), proxies, info.get('discord_webhook', ''))
