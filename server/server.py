@@ -61,10 +61,11 @@ async def get_details(data: DetailsRequest):
 
     url = f'https://api.resy.com/3/details?day={data.day}&party_size={data.party_size}&x-resy-auth-token={data.headers["X-Resy-Auth-Token"]}&venue_id={data.restaurant_id}&config_id={data.config_token}'
     headers = {
-        'Accept': '*/*',
-        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept': 'application/json, text/plain, */*',
         'Authorization': data.headers["Authorization"],
-        'Host': 'api.resy.com',
+        'Origin': 'https://resy.com',
+        'X-Origin': 'https://resy.com',
+        'Referer': 'https://resy.com/',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
 

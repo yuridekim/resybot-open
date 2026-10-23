@@ -32,6 +32,8 @@ def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
             'X-Resy-Universal-Auth': auth_token,
             'Accept': 'application/json, text/plain, */*',
             'Referer': 'https://resy.com/',
+            'Origin': 'https://resy.com',
+            'X-Origin': 'https://resy.com',
     }
 
     #captcha_key = capsolver_key if captcha_service == 'CAPSolver' else capmonster_key
