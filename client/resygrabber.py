@@ -138,8 +138,8 @@ def show_tasks():
         inquirer.Text('party_sz', message="Please enter the party sizes (comma-separated, e.g., 2,3,4):"),
         inquirer.Text('start_date', message="Please enter the start date (YYYY-MM-DD):"),
         inquirer.Text('end_date', message="Please enter the end date (YYYY-MM-DD):"),
-        inquirer.Text('start_time', message="Please enter the start time (Hour only, 0-23):"),
-        inquirer.Text('end_time', message="Please enter the end time (Hour only, 0-23):"),
+        inquirer.Text('start_time', message="Please enter the start time (HH or HH:MM, e.g. 17:30):"),
+        inquirer.Text('end_time', message="Please enter the end time (HH or HH:MM, e.g. 17:30):"),
     ]
     if captcha_services:
         questions.append(inquirer.List('captcha_service',
@@ -212,8 +212,8 @@ def add_task():
         inquirer.Text('party_sz', message="Please enter the party sizes (comma-separated, e.g., 2,3,4):"),
         inquirer.Text('start_date', message="Please enter the start date (YYYY-MM-DD):"),
         inquirer.Text('end_date', message="Please enter the end date (YYYY-MM-DD):"),
-        inquirer.Text('start_time', message="Please enter the start time (Hour only, 0-23):"),
-        inquirer.Text('end_time', message="Please enter the end time (Hour only, 0-23):"),
+        inquirer.Text('start_time', message="Please enter the start time (HH or HH:MM, e.g. 17:30):"),
+        inquirer.Text('end_time', message="Please enter the end time (HH or HH:MM, e.g. 17:30):"),
     ]
     if captcha_services:
         task_questions.append(inquirer.List('captcha_service',
@@ -243,8 +243,8 @@ def add_task():
                     'party_sz': party_size,
                     'start_date': task_answers['start_date'],
                     'end_date': task_answers['end_date'],
-                    'start_time': int(task_answers['start_time']),
-                    'end_time': int(task_answers['end_time']),
+                    'start_time': task_answers['start_time'].strip(),
+                    'end_time': task_answers['end_time'].strip(),
                     'captcha_service': task_answers.get('captcha_service'),
                     'delay': int(task_answers['delay'])
                 }
@@ -903,7 +903,7 @@ def schedule_tasks():
         inquirer.List('task_index', 
                       message="Select a task to schedule:",
                       choices=[(f"Task {i+1}: {task['restaurant_id']}", i) for i, task in enumerate(tasks)]),
-        inquirer.Text('schedule_time', message="Enter the time to schedule (HH:MM):"),
+        inquirer.Text('schedule_time', message="Enter the time to schedule (HH:MM or HH:MM:SS):"),
         inquirer.List('repeat', 
                       message="Repeat schedule?",
                       choices=['Daily', 'Weekly', 'Once']),
@@ -912,17 +912,19 @@ def schedule_tasks():
     answers = inquirer.prompt(questions)
 
     task_index = answers['task_index']
-    schedule_time = datetime.datetime.strptime(answers['schedule_time'], "%H:%M").time()
+    time_str = answers['schedule_time'].strip()
+    time_fmt = "%H:%M:%S" if time_str.count(':') == 2 else "%H:%M"
+    schedule_time = datetime.datetime.strptime(time_str, time_fmt).time()
     duration = int(answers['duration'])
 
     job_id = f"task_{task_index}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     if answers['repeat'] == 'Daily':
         scheduler.add_job(start_and_stop_task, 'cron', args=[task_index, duration, job_id], 
-                          hour=schedule_time.hour, minute=schedule_time.minute, id=job_id)
+                          hour=schedule_time.hour, minute=schedule_time.minute, second=schedule_time.second, id=job_id)
     elif answers['repeat'] == 'Weekly':
         scheduler.add_job(start_and_stop_task, 'cron', args=[task_index, duration, job_id], 
-                          day_of_week='mon-sun', hour=schedule_time.hour, minute=schedule_time.minute, id=job_id)
+                          day_of_week='mon-sun', hour=schedule_time.hour, minute=schedule_time.minute, second=schedule_time.second, id=job_id)
     else:  # Once
         next_run = datetime.datetime.combine(datetime.date.today(), schedule_time)
         if next_run <= datetime.datetime.now():
@@ -930,7 +932,7 @@ def schedule_tasks():
         scheduler.add_job(start_and_stop_task, 'date', args=[task_index, duration, job_id], 
                           run_date=next_run, id=job_id)
 
-    click.echo(f"Task scheduled to run at {schedule_time.strftime('%H:%M')} {answers['repeat']} for {duration} seconds")
+    click.echo(f"Task scheduled to run at {schedule_time.strftime('%H:%M:%S')} {answers['repeat']} for {duration} seconds")
 
 def start_and_stop_task(task_index, duration, job_id):
     task_thread = threading.Thread(target=run_task_with_timeout, args=(task_index, duration, job_id))
