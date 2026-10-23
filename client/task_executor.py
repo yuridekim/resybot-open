@@ -30,8 +30,6 @@ def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
             'Authorization': 'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'X-Resy-Universal-Auth': auth_token,
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Host': 'api.resy.com',
             'Accept': 'application/json, text/plain, */*',
             'Referer': 'https://resy.com/',
     }
@@ -41,7 +39,7 @@ def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
 
     while True:
         try:
-            select_proxy = format_proxy(random.choice(proxies))
+            select_proxy = format_proxy(random.choice(proxies)) if proxies else {}
 
             url = f"https://api.resy.com/4/venue/calendar?venue_id={restaurant_id}&num_seats={party_sz}&start_date={start_date}&end_date={end_date}"
             response = requests.get(url, headers=headers, proxies=select_proxy)
@@ -149,8 +147,15 @@ def book_reservation(book_token, auth_token, payment_id, day, party_size, restau
     return response.json()
         
 def send_discord_notification(webhook_url, message):
-    data = {"content": message}
-    requests.post(webhook_url, json=data)
+    if not webhook_url:
+        print(f"\n[Notification (Console Only)]: {message}\n")
+        return
+    try:
+        data = {"content": message}
+        requests.post(webhook_url, json=data)
+    except Exception as e:
+        print(f"[Notification Error]: Failed to send to Discord: {e}")
+        print(f"[Notification Content]: {message}")
 
 def run_tasks_concurrently(tasks, capsolver_key, capmonster_key, proxies, webhook_url):
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:

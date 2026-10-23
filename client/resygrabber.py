@@ -469,13 +469,22 @@ def delete_account():
 
 def get_random_proxy():
     proxies = load_data(PROXIES_FILE, [])
+    if not proxies:
+        return None
     proxy = random.choice(proxies)
-    ip_port, user_pass = proxy.rsplit(':', 2)[0], proxy.rsplit(':', 2)[1:]
-    proxiesObj = {
-        'http': f'http://{user_pass[0]}:{user_pass[1]}@{ip_port}',
-        'https': f'http://{user_pass[0]}:{user_pass[1]}@{ip_port}'
-    }
-    return proxiesObj
+    try:
+        ip_port, user_pass = proxy.rsplit(':', 2)[0], proxy.rsplit(':', 2)[1:]
+        proxiesObj = {
+            'http': f'http://{user_pass[0]}:{user_pass[1]}@{ip_port}',
+            'https': f'http://{user_pass[0]}:{user_pass[1]}@{ip_port}'
+        }
+        return proxiesObj
+    except Exception:
+        # Fallback for IP:PORT without auth or local address
+        return {
+            'http':f'http://{proxy}',
+            'https':f'http://{proxy}'
+        }
 
 def generate_accounts():
     accounts = load_data(ACCOUNTS_FILE, [])
@@ -698,19 +707,26 @@ def list_reservations():
     accounts = load_data(ACCOUNTS_FILE, [])
     if not accounts:
         click.echo('No accounts found. Please add accounts before listing reservations.')
+        input('\nPress Enter to continue...')
         return
     all_reservations = []
     # Get all reservations for each account
     for account in accounts:
         auth_token = account['auth_token']
         account_name = account['account_name']
-        reservations = get_account_reservations(auth_token, account_name)
-        all_reservations.extend(reservations)
+        try:
+            reservations = get_account_reservations(auth_token, account_name)
+            all_reservations.extend(reservations)
+        except Exception as e:
+            click.echo(f'Error fetching reservatiosn for {account_name}: {e}')
     
     save_data(RESERVATIONS_FILE, all_reservations)
     
     if all_reservations:
         show_reservations()
+    else:
+        click.echo('No upcoming reservations found on your account(s).')
+        input('\nPress Enter to continue')
 
 def show_reservations():
     reservations = load_data(RESERVATIONS_FILE, [])
@@ -938,7 +954,7 @@ def run_task_with_timeout(task_index, duration, job_id):
     }
     
     try:
-        run_tasks_concurrently([task], info['capsolver_key'], info['capmonster_key'], proxies, info['discord_webhook'])
+        run_tasks_concurrently([task], info.get('capsolver_key', ''), info.get('capmonster_key',''), proxies, info.get('discord_webhook', ''))
     except Exception as e:
         print(f"Error starting scheduled task: {e}")
     finally:
@@ -1037,7 +1053,7 @@ def start_tasks():
         return
 
     try:
-        run_tasks_concurrently(tasks, info['capsolver_key'], info['capmonster_key'], proxies, info['discord_webhook'])
+        run_tasks_concurrently(tasks, info.get('capsolver_key', ''), info.get('capmonster_key',''), proxies, info.get('discord_webhook', ''))
     except Exception as e:
         print(f"Error starting tasks: {e}")
     
