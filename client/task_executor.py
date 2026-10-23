@@ -1,103 +1,154 @@
 import random
 import time
+import datetime
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import capsolver
 from urllib.parse import quote
 
+# How long a task keeps trying before giving up (seconds).
+# Start at 08:59:59 + 7s = stops at ~09:00:06.
+MAX_RUNTIME_SECONDS = 7
+# Longest wait between retries after Resy errors / rate limits (seconds).
+MAX_BACKOFF_SECONDS = 1
+
+
+def log(msg):
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}", flush=True)
+
 
 def format_proxy(proxy_str):
-    ip, port, user, password = proxy_str.split(':')
-    return {
-        'http': f'http://{user}:{password}@{ip}:{port}',
-        'https': f'http://{user}:{password}@{ip}:{port}',
-    }
+    parts = proxy_str.split(':')
+    if len(parts) == 4:
+        ip, port, user, password = parts
+        url = f'http://{user}:{password}@{ip}:{port}'
+    else:
+        url = f'http://{proxy_str}'
+    return {'http': url, 'https': url}
+
+
+def date_range(start_date, end_date):
+    start = datetime.date.fromisoformat(start_date)
+    end = datetime.date.fromisoformat(end_date)
+    days = []
+    while start <= end:
+        days.append(start.isoformat())
+        start += datetime.timedelta(days=1)
+    return days
+
+
+def slot_minutes(slot):
+    # Minutes since midnight. Prefer the explicit start time ("2026-11-12 19:30:00"); fall back to the config token.
+    try:
+        hh, mm = slot['date']['start'].split(' ')[1].split(':')[:2]
+    except Exception:
+        hh, mm = slot['config']['token'].split('/')[8].split(':')[:2]
+    return int(hh) * 60 + int(mm)
+
+
+def to_minutes(value, is_end):
+    # "17:30" -> 1050. A bare hour like 21 keeps the old meaning: start = 21:00, end = 21:59.
+    text = str(value).strip()
+    if ':' in text:
+        hh, mm = text.split(':')[:2]
+        return int(hh) * 60 + int(mm)
+    return int(text) * 60 + (59 if is_end else 0)
+
+
+def fmt_minutes(m):
+    return f'{m // 60:02d}:{m % 60:02d}'
+
 
 def execute_task(task, capsolver_key, capmonster_key, proxies, webhook_url):
     auth_token = task['auth_token']
     payment_id = task['payment_id']
     restaurant_id = task['restaurant_id']
     party_sz = task['party_sz']
-    start_date = task['start_date']
-    end_date = task['end_date']
-    start_time = task['start_time']
-    end_time = task['end_time']
-    delay = task['delay']
-    #captcha_service = task['captcha_service']
+    start_min = to_minutes(task['start_time'], is_end=False)
+    end_min = to_minutes(task['end_time'], is_end=True)
+    delay = max(int(task['delay']), 100) / 1000
+    days = date_range(task['start_date'], task['end_date'])
 
     headers = {
-            'X-Resy-Auth-Token': auth_token,
-            'Authorization': 'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'X-Resy-Universal-Auth': auth_token,
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': 'https://resy.com/',
-            'Origin': 'https://resy.com',
-            'X-Origin': 'https://resy.com',
+        'X-Resy-Auth-Token': auth_token,
+        'Authorization': 'ResyAPI api_key="VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5"',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'X-Resy-Universal-Auth': auth_token,
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://resy.com/',
+        'Origin': 'https://resy.com',
+        'X-Origin': 'https://resy.com',
     }
 
-    #captcha_key = capsolver_key if captcha_service == 'CAPSolver' else capmonster_key
-    #capsolver.api_key = captcha_key
+    deadline = time.time() + MAX_RUNTIME_SECONDS
+    backoff = delay
+    tried = set()   # slots that already failed, so we move on to the next one
+    attempts = 0
 
-    while True:
-        try:
-            select_proxy = format_proxy(random.choice(proxies)) if proxies else {}
+    log(f'Task started: venue {restaurant_id}, {party_sz} people, {days[0]}~{days[-1]}, {fmt_minutes(start_min)}-{fmt_minutes(end_min)}, every {delay}s')
 
-            url = f"https://api.resy.com/4/venue/calendar?venue_id={restaurant_id}&num_seats={party_sz}&start_date={start_date}&end_date={end_date}"
-            response = requests.get(url, headers=headers, proxies=select_proxy)
+    while time.time() < deadline:
+        attempts += 1
+        select_proxy = format_proxy(random.choice(proxies)) if proxies else {}
 
+        for day in days:
+            try:
+                url = f"https://api.resy.com/4/find?lat=0&long=0&day={day}&party_size={party_sz}&venue_id={restaurant_id}"
+                response = requests.get(url, headers=headers, proxies=select_proxy, timeout=10)
+            except Exception as e:
+                log(f'Request error ({e}); retrying')
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+                continue
+
+            if response.status_code == 401:
+                send_discord_notification(webhook_url, f'Auth token rejected (401). Get a new token. Stopping task for {restaurant_id}.')
+                return
             if response.status_code != 200:
-                send_discord_notification(webhook_url, f'(1) Failed to get availability for restaurant {restaurant_id} - {response.text} - {response.status_code}')
-                return
-            
-            data = response.json()
-            if 'scheduled' not in data:
-                send_discord_notification(webhook_url, f'Unexpected response format for API1 for restaurant {restaurant_id} - {data}')
-                return
-            for entry in data['scheduled']:
-                if entry['inventory']['reservation'] == 'available':
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+                log(f'HTTP {response.status_code} from Resy; slowing down to {backoff:.1f}s')
+                continue
+            backoff = delay
 
-                    url2 = f"https://api.resy.com/4/find?lat=0&long=0&day={entry['date']}&party_size={party_sz}&venue_id={restaurant_id}"
-                    response2 = requests.get(url2, headers=headers, proxies=select_proxy)
+            try:
+                venues = response.json().get('results', {}).get('venues', [])
+            except Exception:
+                log('Could not read Resy response; retrying')
+                continue
+            slots = venues[0].get('slots', []) if venues else []
 
-                    if response2.status_code != 200:
-                        send_discord_notification(webhook_url, f'(2) Failed to get availability for restaurant {restaurant_id}')
-                        return
-
-                    data2 = response2.json()
-
-                    if 'results' not in data2 :
-                        send_discord_notification(webhook_url, f'Unexpected response format for API2 for restaurant {restaurant_id} - {data2}')
-                        return
-
-                    if 'results' in data2 and 'venues' in data2['results'] and data2['results']['venues']:
-                        for slot in data2['results']['venues'][0]['slots']:
-                            config_token = slot['config']['token']
-                            parts = config_token.split('/')
-                            time_part = parts[8].split(':')[0]
-                            if int(time_part) >= int(start_time) and int(time_part) <= int(end_time):
-                                book_token = get_details(entry['date'], party_sz, config_token, restaurant_id, headers, select_proxy)
-                                print('\nBook_token is :', book_token)
-                                reservationVal = book_reservation(book_token, auth_token, payment_id, entry['date'], party_sz, restaurant_id, config_token, headers, select_proxy)
-
-                                if 'reservation_id' in reservationVal or ('specs' in reservationVal and 'reservation_id' in reservationVal['specs']):
-                                    send_discord_notification(webhook_url, f'Reservation booked for restaurant {restaurant_id} - {reservationVal}')
-                                    return
-                                else:
-                                    send_discord_notification(webhook_url, f'Failed to book reservation for restaurant {restaurant_id} - {reservationVal}')
-                                    return
-                                
-                    else:
-                        send_discord_notification(webhook_url, f'Unexpected response format for API2 for restaurant {restaurant_id} - {data2}')
-                        return
-                else:
+            candidates = []
+            for slot in slots:
+                try:
+                    minutes = slot_minutes(slot)
+                except Exception:
                     continue
-        except Exception as e:
-            import traceback
-            print('failed to execute task')
-            traceback.print_exc()
-            break
-        time.sleep(delay/1000)
+                token = slot['config']['token']
+                if start_min <= minutes <= end_min and token not in tried:
+                    candidates.append(slot)
+
+            if attempts == 1 or attempts % 5 == 0 or candidates:
+                log(f'Check #{attempts} {day}: {len(slots)} slots open, {len(candidates)} in your time range')
+
+            for slot in candidates:
+                config_token = slot['config']['token']
+                tried.add(config_token)
+                label = slot.get('date', {}).get('start', config_token)
+                log(f'Trying {label} ...')
+
+                book_token = get_details(day, party_sz, config_token, restaurant_id, headers, select_proxy)
+                if not book_token:
+                    log(f'Could not get booking token for {label}; trying next slot')
+                    continue
+
+                result = book_reservation(book_token, auth_token, payment_id, day, party_sz, restaurant_id, config_token, headers, select_proxy)
+                if 'reservation_id' in result or ('specs' in result and 'reservation_id' in result['specs']):
+                    send_discord_notification(webhook_url, f'BOOKED {label} at venue {restaurant_id} for {party_sz} - {result}')
+                    return
+                log(f'Booking {label} failed: {str(result)[:300]}')
+
+        time.sleep(backoff)
+
+    send_discord_notification(webhook_url, f'Gave up on venue {restaurant_id} after {MAX_RUNTIME_SECONDS}s ({attempts} checks).')
 
 
 def get_captcha_token(captcha_key, site_key, url, proxy):
@@ -109,7 +160,8 @@ def get_captcha_token(captcha_key, site_key, url, proxy):
     })
     gRecaptchaResponse = solution['gRecaptchaResponse']
     return gRecaptchaResponse
-    
+
+
 def get_details(day, party_size, config_token, restaurant_id, headers, select_proxy):
     url = 'http://127.0.0.1:8000/api/get-details'
     payload = {
@@ -120,15 +172,18 @@ def get_details(day, party_size, config_token, restaurant_id, headers, select_pr
         'headers': headers,
         'select_proxy': select_proxy
     }
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+    except Exception as e:
+        log(f'Local server not reachable ({e}). Is the server running?')
+        return None
 
-    response = requests.post(url, json=payload)
-    
     if response.status_code != 200:
-        print(f'Failed to get details for restaurant {restaurant_id} - {response.text} - {response.status_code}')
-        return
+        log(f'Failed to get details - {response.text[:200]} - {response.status_code}')
+        return None
 
-    data = response.json()
-    return data['response_value']
+    return response.json().get('response_value')
+
 
 def book_reservation(book_token, auth_token, payment_id, day, party_size, restaurant_id, config_token, headers, select_proxy):
     url = 'http://127.0.0.1:8000/api/book-reservation'
@@ -143,21 +198,24 @@ def book_reservation(book_token, auth_token, payment_id, day, party_size, restau
         'headers': headers,
         'select_proxy': select_proxy
     }
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+        return response.json()
+    except Exception as e:
+        return {'error': str(e)}
 
-    response = requests.post(url, json=payload)
 
-    return response.json()
-        
 def send_discord_notification(webhook_url, message):
     if not webhook_url:
-        print(f"\n[Notification (Console Only)]: {message}\n")
+        log(f"[Notification]: {message}")
         return
     try:
         data = {"content": message}
-        requests.post(webhook_url, json=data)
+        requests.post(webhook_url, json=data, timeout=10)
     except Exception as e:
-        print(f"[Notification Error]: Failed to send to Discord: {e}")
-        print(f"[Notification Content]: {message}")
+        log(f"[Notification Error]: Failed to send to Discord: {e}")
+        log(f"[Notification Content]: {message}")
+
 
 def run_tasks_concurrently(tasks, capsolver_key, capmonster_key, proxies, webhook_url):
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
